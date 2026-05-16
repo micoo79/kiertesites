@@ -95,6 +95,8 @@ export default function App() {
 
   const [templateBytes, setTemplateBytes] = useState<Uint8Array | null>(null);
   const [envelopeBytes, setEnvelopeBytes] = useState<Uint8Array | null>(null);
+  const [customDefaultName, setCustomDefaultName] = useState<string | null>(null);
+  const [customEnvelopeName, setCustomEnvelopeName] = useState<string | null>(null);
 
   const [templateSelection, setTemplateSelection] = useState<TemplateSelection>({ kind: "default" });
 
@@ -220,18 +222,48 @@ export default function App() {
 
   const onEnvelopeFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
     const bytes = await readFileAsBytes(file);
     setEnvelopeBytes(bytes);
-    appendLog(`Saját boríték sablon betöltve: ${file.name}`);
+    setCustomEnvelopeName(file.name);
+    appendLog(`Saját boríték sablon betöltve: ${file.name} (${bytes.length} bájt)`);
+  };
+
+  const resetEnvelope = async () => {
+    try {
+      const env = await fetchAsBytes(
+        new URL("templates/boritek.xlsx", document.baseURI).toString(),
+      );
+      setEnvelopeBytes(env);
+      setCustomEnvelopeName(null);
+      appendLog("Boríték sablon visszaállítva az alapra.");
+    } catch (err) {
+      appendLog(`Visszaállítás sikertelen: ${(err as Error).message}`);
+    }
   };
 
   const onDefaultTemplateFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
     const bytes = await readFileAsBytes(file);
     setTemplateBytes(bytes);
-    appendLog(`Saját RTF alap-sablon betöltve: ${file.name}`);
+    setCustomDefaultName(file.name);
+    appendLog(`Saját RTF alap-sablon betöltve: ${file.name} (${bytes.length} bájt)`);
+  };
+
+  const resetDefaultTemplate = async () => {
+    try {
+      const tpl = await fetchAsBytes(
+        new URL("templates/kiertesites4.rtf", document.baseURI).toString(),
+      );
+      setTemplateBytes(tpl);
+      setCustomDefaultName(null);
+      appendLog("Alap RTF sablon visszaállítva.");
+    } catch (err) {
+      appendLog(`Visszaállítás sikertelen: ${(err as Error).message}`);
+    }
   };
 
   const clearInputs = () => {
@@ -615,15 +647,42 @@ export default function App() {
           reloadKey={templatesReloadKey}
         />
         {templateSelection.kind === "default" && (
-          <div className="muted small">
-            Az alap RTF sablont (a repoban lévő <code>kiertesites4.rtf</code>) használja.
-            Sajátot is feltölthetsz az alapsablon helyére:
-            <input type="file" accept=".rtf" onChange={onDefaultTemplateFile} style={{ marginLeft: 8 }} />
+          <div className="upload-row">
+            <span className="muted small">Alap RTF sablon felülírása:</span>
+            <label className="upload-btn">
+              📄 Saját RTF fájl kiválasztása…
+              <input
+                type="file"
+                accept=".rtf,application/rtf"
+                onChange={onDefaultTemplateFile}
+                style={{ display: "none" }}
+              />
+            </label>
+            <span className={customDefaultName ? "upload-pill upload-pill--ok" : "upload-pill"}>
+              {customDefaultName ? `✓ ${customDefaultName}` : "alapértelmezett (kiertesites4.rtf)"}
+            </span>
+            {customDefaultName && (
+              <button type="button" onClick={resetDefaultTemplate}>Visszaállítás</button>
+            )}
           </div>
         )}
-        <div className="muted small">
-          Boríték sablon (XLSX) — postázáshoz, marad ahogy van. Felülírhatod:
-          <input type="file" accept=".xlsx" onChange={onEnvelopeFile} style={{ marginLeft: 8 }} />
+        <div className="upload-row">
+          <span className="muted small">Boríték sablon (XLSX) — postázáshoz:</span>
+          <label className="upload-btn">
+            📊 Saját XLSX fájl kiválasztása…
+            <input
+              type="file"
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              onChange={onEnvelopeFile}
+              style={{ display: "none" }}
+            />
+          </label>
+          <span className={customEnvelopeName ? "upload-pill upload-pill--ok" : "upload-pill"}>
+            {customEnvelopeName ? `✓ ${customEnvelopeName}` : "alapértelmezett (boritek.xlsx)"}
+          </span>
+          {customEnvelopeName && (
+            <button type="button" onClick={resetEnvelope}>Visszaállítás</button>
+          )}
         </div>
       </section>
 
