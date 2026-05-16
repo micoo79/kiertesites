@@ -151,6 +151,20 @@ function replacePlaceholdersInHtml(
 }
 
 /**
+ * A TipTap HTML-jét Word-barát formára hozza:
+ * - üres `<p></p>` és `<p><br></p>` bekezdéseket `<p>&nbsp;</p>`-vé alakítja,
+ *   hogy a Word megjelenítse a vertikális helyet;
+ * - bezárja a teljesen üres bekezdéseken belüli whitespace-eket.
+ */
+function makeWordFriendly(html: string): string {
+  // Üres bekezdés (csak whitespace vagy <br>) → &nbsp;
+  return html.replace(
+    /<p\b([^>]*)>(\s|<br\s*\/?>)*<\/p>/gi,
+    '<p$1>&nbsp;</p>',
+  );
+}
+
+/**
  * Word-kompatibilis .doc HTML fájl előállítása az összes címzettre.
  * Page-break-előre stílussal vágunk oldalt minden címzett között.
  */
@@ -176,7 +190,7 @@ export function buildCustomLetterDoc(
     };
     const { html, missing } = replacePlaceholdersInHtml(body, values);
     missing.forEach((m) => allMissing.add(m));
-    pages.push(`<div class="letter-page">${html}</div>`);
+    pages.push(`<div class="letter-page">${makeWordFriendly(html)}</div>`);
   }
 
   // .doc kompatibilis HTML wrapper, Word felismeri a page-break-eket.
@@ -187,17 +201,36 @@ export function buildCustomLetterDoc(
 <head>
 <meta charset="utf-8">
 <title>${escapeHtml(template.name)}</title>
+<!--[if gte mso 9]>
+<xml>
+  <w:WordDocument>
+    <w:View>Print</w:View>
+    <w:Zoom>100</w:Zoom>
+    <w:DoNotOptimizeForBrowser/>
+  </w:WordDocument>
+</xml>
+<![endif]-->
 <style>
-  @page { size: A4; margin: 2cm; }
+  @page WordSection1 { size: A4; margin: 2cm; mso-page-orientation: portrait; }
+  div.WordSection1 { page: WordSection1; }
   body { font-family: "Times New Roman", serif; font-size: 12pt; line-height: 1.4; }
+  p {
+    margin: 0 0 8pt 0;
+    mso-margin-top-alt: auto;
+    mso-margin-bottom-alt: auto;
+    mso-pagination: widow-orphan;
+    line-height: 1.4;
+  }
   .letter-page { page-break-after: always; }
   .letter-page:last-child { page-break-after: auto; }
-  p { margin: 0 0 8pt 0; }
   ul, ol { margin: 0 0 8pt 24pt; }
+  br { mso-special-character: line-break; }
 </style>
 </head>
 <body>
+<div class="WordSection1">
 ${pages.join("\n")}
+</div>
 </body>
 </html>`;
 
