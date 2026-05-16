@@ -42,10 +42,10 @@ async function bootPyodide(
   const pyodide = await window.loadPyodide({ indexURL: PYODIDE_BASE });
 
   onProgress("Csomagok telepítése (micropip, openpyxl, pypdf)…");
-  await pyodide.loadPackage(["micropip", "openpyxl"]);
+  await pyodide.loadPackage(["micropip"]);
   await pyodide.runPythonAsync(`
 import micropip
-await micropip.install("pypdf")
+await micropip.install(["openpyxl", "pypdf"])
 `);
 
   onProgress("Magmodul betöltése…");
