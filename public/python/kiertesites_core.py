@@ -1113,3 +1113,365 @@ def generate_outputs(payload_obj):
         "xlsx_filename": xlsx_filename,
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Feltöltött sablonból (RTF vagy DOCX) levél generálás
+# ---------------------------------------------------------------------------
+
+ONLY_PERSONAL_START = "[[csak_szemelyes]]"
+ONLY_PERSONAL_END = "[[/csak_szemelyes]]"
+
+
+def _remove_marker_only_rtf(rtf_text: str, codepage: str, marker_text: str) -> str:
+    """Egy adott szöveges markert eltávolít a látható szövegből — tartalmat nem érint."""
+    compact_marker, _ = compact_plain_with_map(marker_text)
+    if not compact_marker:
+        return rtf_text
+
+    while True:
+        items = rtf_text_map(rtf_text, codepage=codepage)
+        if not items:
+            break
+        plain = "".join(item.char for item in items)
+        compact_plain, compact_to_plain = compact_plain_with_map(plain)
+        idx = compact_plain.find(compact_marker)
+        if idx == -1:
+            break
+        start_plain = compact_to_plain[idx]
+        end_plain = compact_to_plain[idx + len(compact_marker) - 1] + 1
+        raw_start = items[start_plain].start
+        raw_end = items[end_plain - 1].end
+        rtf_text = rtf_text[:raw_start] + rtf_text[raw_end:]
+    return rtf_text
+
+
+def _apply_personal_markers_rtf(rtf_text: str, codepage: str, postal: bool) -> str:
+    """A [[csak_szemelyes]]...[[/csak_szemelyes]] blokk kezelése a feltöltött RTF-ben."""
+    if postal:
+        rtf_text = remove_visible_span_by_compact_text(
+            rtf_text,
+            start_text=ONLY_PERSONAL_START,
+            end_text=ONLY_PERSONAL_END,
+            codepage=codepage,
+            extend_to_paragraph=True,
+        )
+        # Ha valamilyen okból maradtak markerek, töröljük őket
+        rtf_text = _remove_marker_only_rtf(rtf_text, codepage, ONLY_PERSONAL_START)
+        rtf_text = _remove_marker_only_rtf(rtf_text, codepage, ONLY_PERSONAL_END)
+    else:
+        rtf_text = _remove_marker_only_rtf(rtf_text, codepage, ONLY_PERSONAL_START)
+        rtf_text = _remove_marker_only_rtf(rtf_text, codepage, ONLY_PERSONAL_END)
+    return rtf_text
+
+
+def _replace_in_docx_paragraph(p_elem, aliases: Dict[str, str]) -> None:
+    """Paragrafus szövegében cseréli a [[placeholder]]-eket. A formázás
+    egy paragrafuson belül egységessé válik (egy w:t-be kerül a teljes szöveg)."""
+    from docx.oxml.ns import qn
+
+    text_nodes = p_elem.findall(".//" + qn("w:t"))
+    if not text_nodes:
+        return
+    full_text = "".join(t.text or "" for t in text_nodes)
+
+    def replace_fn(match: "re.Match") -> str:
+        name = normalize_placeholder_name(match.group(1))
+        value = aliases.get(name)
+        if value is None:
+            return match.group(0)
+        return value
+
+    new_text = PLACEHOLDER_RE.sub(replace_fn, full_text)
+    new_text = STAR_PLACEHOLDER_RE.sub(replace_fn, new_text)
+
+    if new_text != full_text:
+        text_nodes[0].text = new_text
+        text_nodes[0].set(qn("xml:space"), "preserve")
+        for t in text_nodes[1:]:
+            t.text = ""
+
+
+def _paragraph_text(p_elem) -> str:
+    from docx.oxml.ns import qn
+
+    text_nodes = p_elem.findall(".//" + qn("w:t"))
+    return "".join(t.text or "" for t in text_nodes)
+
+
+def _strip_text_from_paragraph(p_elem, fragment: str) -> None:
+    """Egy adott szöveges fragmentumot eltávolít a paragrafusból (akár több w:t-ből összerakva)."""
+    from docx.oxml.ns import qn
+
+    if not fragment:
+        return
+    text_nodes = p_elem.findall(".//" + qn("w:t"))
+    if not text_nodes:
+        return
+    full_text = "".join(t.text or "" for t in text_nodes)
+    new_text = full_text.replace(fragment, "")
+    if new_text != full_text:
+        text_nodes[0].text = new_text
+        text_nodes[0].set(qn("xml:space"), "preserve")
+        for t in text_nodes[1:]:
+            t.text = ""
+
+
+def _process_docx_personal_markers(body_elems, postal: bool):
+    """A [[csak_szemelyes]]...[[/csak_szemelyes]] kezelés DOCX paragrafus szinten."""
+    from docx.oxml.ns import qn
+
+    out = []
+    in_block = False
+    for elem in body_elems:
+        if elem.tag == qn("w:p"):
+            text = _paragraph_text(elem)
+            has_start = ONLY_PERSONAL_START in text
+            has_end = ONLY_PERSONAL_END in text
+
+            if postal:
+                if has_start and has_end:
+                    # Egy paragrafusban van mindkettő — egész paragrafust dobjuk
+                    continue
+                if has_start:
+                    in_block = True
+                    continue
+                if has_end:
+                    in_block = False
+                    continue
+                if in_block:
+                    continue
+                out.append(elem)
+            else:
+                if has_start:
+                    _strip_text_from_paragraph(elem, ONLY_PERSONAL_START)
+                if has_end:
+                    _strip_text_from_paragraph(elem, ONLY_PERSONAL_END)
+                out.append(elem)
+        else:
+            if postal and in_block:
+                continue
+            out.append(elem)
+    return out
+
+
+def _generate_letters_from_rtf(template_bytes: bytes, recipients, global_values, postal: bool):
+    template_rtf, codepage = read_rtf_bytes(template_bytes)
+    template_rtf = _apply_personal_markers_rtf(template_rtf, codepage, postal)
+
+    final_rtf = build_letters_rtf(
+        template_rtf=template_rtf,
+        codepage=codepage,
+        recipients=recipients,
+        global_values=global_values,
+        postal=False,  # a marker-blokkot már külön kezeltük
+    )
+    warnings: List[str] = []
+    if not validate_rtf_braces(final_rtf):
+        warnings.append("Figyelem: az elkészült RTF kapcsoszárójel-egyensúlya hibásnak tűnik.")
+
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return {
+        "letter_bytes": rtf_to_bytes(final_rtf, codepage),
+        "letter_filename": f"kiertesitesek_{stamp}.rtf",
+        "letter_mime": "application/rtf",
+        "warnings": warnings,
+    }
+
+
+def _generate_letters_from_docx(template_bytes: bytes, recipients, global_values, postal: bool):
+    try:
+        from docx import Document
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+    except ImportError as exc:
+        raise RuntimeError("A python-docx könyvtár hiányzik a Pyodide környezetből.") from exc
+
+    from copy import deepcopy
+
+    src_doc = Document(io.BytesIO(template_bytes))
+    body = src_doc.element.body
+
+    sectPr = body.find(qn("w:sectPr"))
+    template_elems = [c for c in list(body) if c.tag != qn("w:sectPr")]
+
+    # Body kiürítése (sectPr marad)
+    for c in list(body):
+        if c.tag != qn("w:sectPr"):
+            body.remove(c)
+
+    for i, recipient in enumerate(recipients):
+        values = dict(global_values)
+        values.update(
+            {
+                "tulajdonos_neve": recipient.name,
+                "tulajdonos_cime": recipient.address,
+                "kozseg": recipient.settlement or global_values.get("kozseg", ""),
+                "cimzett_neve": recipient.name,
+                "cimzett_cime": recipient.address,
+            }
+        )
+        aliases = build_placeholder_aliases(values)
+
+        cloned = [deepcopy(e) for e in template_elems]
+        cloned = _process_docx_personal_markers(cloned, postal)
+
+        for elem in cloned:
+            for p in elem.iter(qn("w:p")):
+                _replace_in_docx_paragraph(p, aliases)
+
+        # Beillesztés a body-be (sectPr elé)
+        for elem in cloned:
+            if sectPr is not None:
+                body.insert(list(body).index(sectPr), elem)
+            else:
+                body.append(elem)
+
+        # Page break a következő címzett előtt
+        if i < len(recipients) - 1:
+            page_p = OxmlElement("w:p")
+            page_r = OxmlElement("w:r")
+            page_br = OxmlElement("w:br")
+            page_br.set(qn("w:type"), "page")
+            page_r.append(page_br)
+            page_p.append(page_r)
+            if sectPr is not None:
+                body.insert(list(body).index(sectPr), page_p)
+            else:
+                body.append(page_p)
+
+    output = io.BytesIO()
+    src_doc.save(output)
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return {
+        "letter_bytes": output.getvalue(),
+        "letter_filename": f"kiertesitesek_{stamp}.docx",
+        "letter_mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "warnings": [],
+    }
+
+
+def list_template_placeholders(payload_obj):
+    """Megnézi mi placeholdereket tartalmaz egy feltöltött RTF/DOCX sablon.
+
+    payload: { template_bytes: bytes, template_filename: str }
+    """
+    payload = _coerce_to_python(payload_obj) or {}
+    data = payload.get("template_bytes")
+    filename = str(payload.get("template_filename", ""))
+    if not isinstance(data, (bytes, bytearray)):
+        data = bytes(data)
+    lower = (filename or "").lower()
+    if lower.endswith(".rtf"):
+        rtf, cp = read_rtf_bytes(bytes(data))
+        names = find_rtf_placeholders(rtf, codepage=cp)
+        return {"kind": "rtf", "placeholders": names}
+    if lower.endswith(".docx"):
+        try:
+            from docx import Document
+        except ImportError as exc:
+            raise RuntimeError("A python-docx könyvtár hiányzik.") from exc
+        doc = Document(io.BytesIO(bytes(data)))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        names: List[str] = []
+        for rex in (PLACEHOLDER_RE, STAR_PLACEHOLDER_RE):
+            for m in rex.finditer(text):
+                n = normalize_placeholder_name(m.group(1))
+                if n and n not in names:
+                    names.append(n)
+        return {"kind": "docx", "placeholders": names}
+    if lower.endswith(".doc"):
+        raise RuntimeError(
+            "A bináris .doc formátum nem támogatott. A Word-ben mentsd 'RTF' vagy 'Word dokumentum (.docx)' formában."
+        )
+    raise RuntimeError(f"Nem támogatott fájltípus: {filename}")
+
+
+def generate_outputs_from_uploaded_template(payload_obj):
+    """
+    Levél-generálás feltöltött RTF vagy DOCX sablonnal.
+
+    payload:
+      template_bytes: bytes
+      template_filename: str  ('.rtf' vagy '.docx' kiterjesztés alapján döntünk)
+      envelope_bytes: bytes | None
+      recipients: [...]
+      global_values: {...}
+      postal: bool
+      make_envelope: bool
+    """
+    payload = _coerce_to_python(payload_obj) or {}
+    template_bytes = payload.get("template_bytes")
+    if not isinstance(template_bytes, (bytes, bytearray)):
+        template_bytes = bytes(template_bytes)
+    template_bytes = bytes(template_bytes)
+    filename = str(payload.get("template_filename", ""))
+    envelope_bytes = payload.get("envelope_bytes")
+    if envelope_bytes is not None and not isinstance(envelope_bytes, (bytes, bytearray)):
+        envelope_bytes = bytes(envelope_bytes)
+
+    raw_recipients = _coerce_to_python(payload.get("recipients")) or []
+    recipients: List[Recipient] = []
+    for r in raw_recipients:
+        r = _coerce_to_python(r)
+        recipients.append(
+            Recipient(
+                name=str(r.get("name", "")).strip(),
+                address=str(r.get("address", "")).strip(),
+                role=str(r.get("role", "tulajdonos")).strip() or "tulajdonos",
+                source_file=str(r.get("source_file", "")),
+                settlement=str(r.get("settlement", "")).strip(),
+            )
+        )
+
+    if not recipients:
+        raise RuntimeError("Nincs címzett a generáláshoz.")
+
+    for idx, recipient in enumerate(recipients, 1):
+        if not recipient.name or not recipient.address:
+            raise RuntimeError(f"A(z) {idx}. címzettnél hiányzik a név vagy a cím.")
+
+    global_values = _coerce_to_python(payload.get("global_values")) or {}
+    global_values = {str(k): str(v) for k, v in global_values.items()}
+
+    if not global_values.get("keltezes", "").strip():
+        global_values["keltezes"] = today_hu()
+
+    for recipient in recipients:
+        if not recipient.settlement:
+            recipient.settlement = global_values.get("kozseg", "")
+
+    postal = bool(payload.get("postal", False))
+    make_envelope = bool(payload.get("make_envelope", True))
+
+    lower = filename.lower()
+    if lower.endswith(".rtf"):
+        result = _generate_letters_from_rtf(template_bytes, recipients, global_values, postal)
+    elif lower.endswith(".docx"):
+        result = _generate_letters_from_docx(template_bytes, recipients, global_values, postal)
+    elif lower.endswith(".doc"):
+        raise RuntimeError(
+            "A bináris .doc formátum nem támogatott. A Word-ben mentsd 'RTF' vagy 'Word dokumentum (.docx)' formában."
+        )
+    else:
+        raise RuntimeError(f"Nem támogatott sablon fájltípus: {filename}")
+
+    xlsx_bytes = None
+    xlsx_filename = None
+    warnings = list(result.get("warnings", []))
+
+    if postal and make_envelope and envelope_bytes:
+        xlsx_bytes = generate_envelopes_xlsx_bytes(bytes(envelope_bytes), recipients)
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        xlsx_filename = f"boritekok_{stamp}.xlsx"
+    elif postal and make_envelope and not envelope_bytes:
+        warnings.append("Nincs boríték sablon, ezért XLSX nem készült.")
+
+    return {
+        "letter_bytes": result["letter_bytes"],
+        "letter_filename": result["letter_filename"],
+        "letter_mime": result["letter_mime"],
+        "xlsx_bytes": xlsx_bytes,
+        "xlsx_filename": xlsx_filename,
+        "warnings": warnings,
+    }
