@@ -1,6 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePyodide } from "./usePyodide";
 import type { PyodideInterface } from "./pyodide.d";
+import TemplateManager from "./TemplateManager";
+import type { TemplateSelection } from "./templates";
+import {
+  buildCustomLetterDoc,
+  loadTemplates,
+} from "./templates";
+import {
+  downloadBytes,
+  downloadText,
+  huDateToIso,
+  isoDateToHu,
+  timestamp,
+  todayHu,
+  todayIso,
+} from "./utils";
 
 type Recipient = {
   name: string;
@@ -11,9 +26,9 @@ type Recipient = {
 };
 
 type GeneratedFile = {
-  bytes: Uint8Array;
+  bytes?: Uint8Array;
+  text?: string;
   filename: string;
-  url: string;
   mime: string;
 };
 
@@ -25,13 +40,9 @@ const ROLE_OPTIONS = [
   "özvegyi jog jogosultja",
 ];
 
-function todayHu(): string {
-  const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}.${mm}.${dd}.`;
-}
+const RTF_MIME = "application/rtf";
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const DOC_MIME = "application/msword";
 
 async function fetchAsBytes(url: string): Promise<Uint8Array> {
   const res = await fetch(url);
@@ -52,12 +63,6 @@ function readFileAsBytes(file: File): Promise<Uint8Array> {
   });
 }
 
-function downloadBlob(bytes: Uint8Array, filename: string, mime: string): GeneratedFile {
-  const blob = new Blob([bytes as BlobPart], { type: mime });
-  const url = URL.createObjectURL(blob);
-  return { bytes, filename, url, mime };
-}
-
 function callPython<T>(pyodide: PyodideInterface, fnName: string, arg: unknown): T {
   const fn = pyodide.runPython(`kiertesites_core.${fnName}`) as (a: unknown) => unknown;
   const pyArg = pyodide.toPy(arg);
@@ -74,26 +79,35 @@ function callPython<T>(pyodide: PyodideInterface, fnName: string, arg: unknown):
   }
 }
 
-const RTF_MIME = "application/rtf";
-const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+function dedupeRecipients(list: Recipient[]): Recipient[] {
+  const seen = new Set<string>();
+  const out: Recipient[] = [];
+  for (const r of list) {
+    const key = `${r.name.trim().toLowerCase()}||${r.address.trim().toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
 
 export default function App() {
   const { pyodide, status, error } = usePyodide();
 
   const [templateBytes, setTemplateBytes] = useState<Uint8Array | null>(null);
-  const [templateName, setTemplateName] = useState<string>("kiertesites4.rtf (alapértelmezett)");
   const [envelopeBytes, setEnvelopeBytes] = useState<Uint8Array | null>(null);
-  const [envelopeName, setEnvelopeName] = useState<string>("boritek.xlsx (alapértelmezett)");
 
-  const [inputFiles, setInputFiles] = useState<{ file: File; bytes: Uint8Array }[]>([]);
+  const [templateSelection, setTemplateSelection] = useState<TemplateSelection>({ kind: "default" });
+
+  const [inputFiles, setInputFiles] = useState<{ name: string; bytes: Uint8Array }[]>([]);
   const [recipients, setRecipients] = useState<Recipient[]>([]);
   const [defaultSettlement, setDefaultSettlement] = useState("");
 
-  const [kituzendoHrsz, setKituzendoHrsz] = useState("");
-  const [kituzesDatuma, setKituzesDatuma] = useState("");
-  const [oraPerc, setOraPerc] = useState("");
-  const [keltezes, setKeltezes] = useState(todayHu());
   const [kozseg, setKozseg] = useState("");
+  const [kituzendoHrsz, setKituzendoHrsz] = useState("");
+  const [kituzesIso, setKituzesIso] = useState("");
+  const [oraPerc, setOraPerc] = useState("");
+  const [keltezesIso, setKeltezesIso] = useState(todayIso());
 
   const [deliveryMode, setDeliveryMode] = useState<"posta" | "személyes">("posta");
   const [makeEnvelope, setMakeEnvelope] = useState(true);
@@ -117,7 +131,7 @@ export default function App() {
     }
   }, [logLines]);
 
-  // Default sablonok betöltése egyszer
+  // Default sablonok betöltése
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -139,28 +153,53 @@ export default function App() {
     };
   }, [appendLog]);
 
-  const onTemplateFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const bytes = await readFileAsBytes(file);
-    setTemplateBytes(bytes);
-    setTemplateName(file.name);
-    appendLog(`Saját RTF sablon betöltve: ${file.name}`);
-  };
+  // Bemeneti fájlok automatikus parse-olása
+  const parseFiles = useCallback(
+    async (files: { name: string; bytes: Uint8Array }[]) => {
+      if (!pyodide || files.length === 0) return;
+      setBusy("Címzettek kinyerése…");
+      try {
+        const payload = files.map((f) => ({ name: f.name, data: f.bytes }));
+        const result = callPython<{
+          recipients: Recipient[];
+          default_settlement: string;
+          log: string[];
+        }>(pyodide, "parse_uploaded_sheets", payload);
 
-  const onEnvelopeFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const bytes = await readFileAsBytes(file);
-    setEnvelopeBytes(bytes);
-    setEnvelopeName(file.name);
-    appendLog(`Saját boríték sablon betöltve: ${file.name}`);
-  };
+        for (const line of result.log) appendLog(line);
+
+        const ds = result.default_settlement || "";
+        if (ds) {
+          setDefaultSettlement(ds);
+          setKozseg((prev) => (prev.trim() ? prev : ds));
+        }
+
+        const newRecipients = result.recipients.map((r) => ({
+          ...r,
+          settlement: r.settlement || ds || "",
+        }));
+
+        setRecipients((prev) => {
+          const merged = dedupeRecipients([...prev, ...newRecipients]);
+          appendLog(
+            `Hozzáadva ${newRecipients.length} címzett (összes egyedi: ${merged.length}).`,
+          );
+          return merged;
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        appendLog(`Hiba a feldolgozás közben: ${message}`);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [pyodide, appendLog],
+  );
 
   const onAddInputs = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (files.length === 0) return;
-    const newOnes: { file: File; bytes: Uint8Array }[] = [];
+    const newOnes: { name: string; bytes: Uint8Array; file: File }[] = [];
     for (const f of files) {
       const lower = f.name.toLowerCase();
       if (!lower.endsWith(".pdf") && !lower.endsWith(".txt")) {
@@ -168,72 +207,42 @@ export default function App() {
         continue;
       }
       const bytes = await readFileAsBytes(f);
-      newOnes.push({ file: f, bytes });
-    }
-    setInputFiles((prev) => [...prev, ...newOnes]);
-    if (newOnes.length > 0) {
-      appendLog(`Hozzáadva ${newOnes.length} bemeneti fájl.`);
+      newOnes.push({ name: f.name, bytes, file: f });
     }
     e.target.value = "";
+    if (newOnes.length === 0) return;
+    setInputFiles((prev) => [...prev, ...newOnes.map((n) => ({ name: n.name, bytes: n.bytes }))]);
+    // Automatikus parse-olás csak az ÚJ fájlokra (a régiek már fel vannak véve).
+    await parseFiles(newOnes.map((n) => ({ name: n.name, bytes: n.bytes })));
+  };
+
+  const onEnvelopeFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const bytes = await readFileAsBytes(file);
+    setEnvelopeBytes(bytes);
+    appendLog(`Saját boríték sablon betöltve: ${file.name}`);
+  };
+
+  const onDefaultTemplateFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const bytes = await readFileAsBytes(file);
+    setTemplateBytes(bytes);
+    appendLog(`Saját RTF alap-sablon betöltve: ${file.name}`);
+  };
+
+  const clearInputs = () => {
+    setInputFiles([]);
+    appendLog("Bemeneti fájl-lista törölve. (A már felvett címzettek a táblázatban maradnak.)");
   };
 
   const removeInput = (index: number) => {
     setInputFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const clearInputs = () => setInputFiles([]);
-
-  const parseInputs = async () => {
-    if (!pyodide) {
-      appendLog("A Pyodide még nem áll készen.");
-      return;
-    }
-    if (inputFiles.length === 0) {
-      appendLog("Adj hozzá legalább egy PDF/TXT tulajdoni lapot.");
-      return;
-    }
-    setBusy("Címzettek kinyerése…");
-    try {
-      appendLog("Címzettek kinyerése indul…");
-      const payload = inputFiles.map(({ file, bytes }) => ({
-        name: file.name,
-        data: bytes,
-      }));
-      const result = callPython<{
-        recipients: Recipient[];
-        default_settlement: string;
-        log: string[];
-      }>(pyodide, "parse_uploaded_sheets", payload);
-
-      for (const line of result.log) appendLog(line);
-
-      const ds = result.default_settlement || "";
-      setDefaultSettlement(ds);
-      if (ds && !kozseg.trim()) setKozseg(ds);
-
-      const filled = result.recipients.map((r) => ({
-        ...r,
-        settlement: r.settlement || ds || kozseg,
-      }));
-      setRecipients(filled);
-
-      if (filled.length === 0) {
-        appendLog("Nem sikerült automatikusan címzettet kinyerni. Manuálisan adj hozzá címzettet.");
-      } else {
-        appendLog(`Kinyerés kész: ${filled.length} egyedi címzett.`);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      appendLog(`Hiba: ${message}`);
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const updateRecipient = (index: number, patch: Partial<Recipient>) => {
-    setRecipients((prev) =>
-      prev.map((r, i) => (i === index ? { ...r, ...patch } : r)),
-    );
+    setRecipients((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
   };
 
   const removeRecipient = (index: number) => {
@@ -253,11 +262,54 @@ export default function App() {
     ]);
   };
 
-  const askExtras = async (
+  const clearRecipients = () => {
+    if (!window.confirm("Biztosan törlöd az összes címzettet?")) return;
+    setRecipients([]);
+  };
+
+  const validateCommon = (): Record<string, string> | null => {
+    if (!kozseg.trim()) {
+      appendLog("Hiányzik a település/község.");
+      return null;
+    }
+    if (!kituzendoHrsz.trim()) {
+      appendLog("Hiányzik a kitűzendő helyrajzi szám.");
+      return null;
+    }
+    if (!kituzesIso) {
+      appendLog("Hiányzik a kitűzés dátuma.");
+      return null;
+    }
+    if (!oraPerc.trim()) {
+      appendLog("Hiányzik a kitűzés időpontja.");
+      return null;
+    }
+    if (recipients.length === 0) {
+      appendLog("Nincs címzett a listában.");
+      return null;
+    }
+    for (let i = 0; i < recipients.length; i++) {
+      const r = recipients[i];
+      if (!r.name.trim() || !r.address.trim()) {
+        appendLog(`A(z) ${i + 1}. címzettnél hiányzik a név vagy a cím.`);
+        return null;
+      }
+    }
+
+    return {
+      kozseg: kozseg.trim(),
+      kituzendo_hrsz: kituzendoHrsz.trim(),
+      kituzes_datuma: isoDateToHu(kituzesIso),
+      ora_perc: oraPerc.trim(),
+      keltezes: keltezesIso ? isoDateToHu(keltezesIso) : todayHu(),
+    };
+  };
+
+  const askExtras = (
     py: PyodideInterface,
     tplBytes: Uint8Array,
     knownKeys: Set<string>,
-  ): Promise<Record<string, string> | null> => {
+  ): Record<string, string> | null => {
     const info = callPython<{ extras: string[]; codepage: string }>(
       py,
       "list_extra_template_fields",
@@ -279,89 +331,179 @@ export default function App() {
     return extraValues;
   };
 
-  const generate = async () => {
-    if (!pyodide) {
-      appendLog("A Pyodide még nem áll készen.");
-      return;
-    }
-    if (!templateBytes) {
-      appendLog("Hiányzik az RTF sablon.");
-      return;
-    }
-    if (recipients.length === 0) {
-      appendLog("Nincs címzett a listában.");
-      return;
-    }
-    for (let i = 0; i < recipients.length; i++) {
-      const r = recipients[i];
-      if (!r.name.trim() || !r.address.trim()) {
-        appendLog(`A(z) ${i + 1}. címzettnél hiányzik a név vagy a cím.`);
-        return;
+  const askExtrasForCustom = (
+    html: string,
+    knownKeys: Set<string>,
+  ): Record<string, string> | null => {
+    // Egyszerű regex alapú placeholder extraction
+    const div = document.createElement("div");
+    div.innerHTML = html;
+    const text = div.textContent || "";
+    const re = /\[\s*\[?\s*([0-9A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű_]+(?:\s*[0-9A-Za-zÁÉÍÓÖŐÚÜŰáéíóöőúüű_]+)*)\s*\]\s*\]/gu;
+    const starRe = /\[\s*\*\s*([^*]+?)\s*\*\s*\]/gu;
+    const names = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) names.add(m[1].replace(/\s+/g, ""));
+    while ((m = starRe.exec(text)) !== null) names.add(m[1].replace(/\s+/g, ""));
+    const RECIPIENT_KNOWN = [
+      "tulajdonos_neve", "tulajdonos_cime", "tulajdonos_címe",
+      "cimzett_neve", "címzett_neve",
+      "cimzett_cime", "címzett_cime", "cimzett_címe", "címzett_címe",
+    ];
+    const extras: Record<string, string> = {};
+    for (const name of names) {
+      if (knownKeys.has(name) || RECIPIENT_KNOWN.includes(name)) continue;
+      const value = window.prompt(
+        `A sablonban találtam egy további mezőt:\n\n[[${name}]]\n\nAdd meg az értékét:`,
+      );
+      if (value === null) return null;
+      if (!value.trim()) {
+        alert(`A(z) [[${name}]] mező nem maradhat üresen.`);
+        return null;
       }
+      extras[name] = value.trim();
     }
-    if (!kituzendoHrsz.trim() || !kituzesDatuma.trim() || !oraPerc.trim() || !kozseg.trim()) {
-      appendLog("Hiányos kitűzési adatok. Töltsd ki az összes kötelező mezőt.");
-      return;
-    }
+    return extras;
+  };
+
+  const generate = async () => {
+    const globalValues = validateCommon();
+    if (!globalValues) return;
+
+    const postal = deliveryMode === "posta";
 
     setBusy("Generálás folyamatban…");
     try {
-      const globalValues: Record<string, string> = {
-        kituzendo_hrsz: kituzendoHrsz.trim(),
-        kituzes_datuma: kituzesDatuma.trim(),
-        ora_perc: oraPerc.trim(),
-        keltezes: (keltezes || todayHu()).trim(),
-        kozseg: kozseg.trim(),
-      };
+      // Címzettek településének kitöltése
+      const finalRecipients = recipients.map((r) => ({
+        ...r,
+        settlement: r.settlement || globalValues.kozseg,
+      }));
 
-      const knownKeys = new Set<string>(Object.keys(globalValues));
-      const extras = await askExtras(pyodide, templateBytes, knownKeys);
-      if (extras === null) {
-        appendLog("Generálás megszakítva (hiányzó sablonadat).");
-        setBusy(null);
-        return;
-      }
-      Object.assign(globalValues, extras);
-
-      const postal = deliveryMode === "posta";
-
-      const payload = {
-        template_bytes: templateBytes,
-        envelope_bytes: postal && makeEnvelope ? envelopeBytes : null,
-        recipients,
-        global_values: globalValues,
-        postal,
-        make_envelope: makeEnvelope,
-      };
-
-      appendLog("RTF generálása…");
-      const result = callPython<{
-        rtf_bytes: Uint8Array;
-        rtf_filename: string;
-        xlsx_bytes: Uint8Array | null;
-        xlsx_filename: string | null;
-        warnings: string[];
-      }>(pyodide, "generate_outputs", payload);
-
-      for (const w of result.warnings) appendLog(w);
+      // Előző letöltések URL-jeit nem tartjuk megnyitva
+      setOutputs([]);
 
       const newOutputs: GeneratedFile[] = [];
-      // Revoke előző URL-eket
-      for (const o of outputs) URL.revokeObjectURL(o.url);
+      const stamp = timestamp();
 
-      newOutputs.push(
-        downloadBlob(new Uint8Array(result.rtf_bytes), result.rtf_filename, RTF_MIME),
-      );
-      appendLog(`Elkészült RTF: ${result.rtf_filename}`);
+      if (templateSelection.kind === "default") {
+        if (!pyodide) {
+          appendLog("A Pyodide még nem áll készen.");
+          setBusy(null);
+          return;
+        }
+        if (!templateBytes) {
+          appendLog("Hiányzik az RTF sablon.");
+          setBusy(null);
+          return;
+        }
 
-      if (result.xlsx_bytes && result.xlsx_filename) {
-        newOutputs.push(
-          downloadBlob(new Uint8Array(result.xlsx_bytes), result.xlsx_filename, XLSX_MIME),
-        );
-        appendLog(`Elkészült boríték Excel: ${result.xlsx_filename}`);
+        const knownKeys = new Set(Object.keys(globalValues));
+        const extras = askExtras(pyodide, templateBytes, knownKeys);
+        if (extras === null) {
+          appendLog("Generálás megszakítva (hiányzó sablonadat).");
+          setBusy(null);
+          return;
+        }
+        const allValues = { ...globalValues, ...extras };
+
+        appendLog("RTF generálása…");
+        const result = callPython<{
+          rtf_bytes: Uint8Array;
+          rtf_filename: string;
+          xlsx_bytes: Uint8Array | null;
+          xlsx_filename: string | null;
+          warnings: string[];
+        }>(pyodide, "generate_outputs", {
+          template_bytes: templateBytes,
+          envelope_bytes: postal && makeEnvelope ? envelopeBytes : null,
+          recipients: finalRecipients,
+          global_values: allValues,
+          postal,
+          make_envelope: makeEnvelope,
+        });
+
+        for (const w of result.warnings) appendLog(w);
+
+        newOutputs.push({
+          bytes: new Uint8Array(result.rtf_bytes),
+          filename: result.rtf_filename,
+          mime: RTF_MIME,
+        });
+        appendLog(`Elkészült RTF: ${result.rtf_filename}`);
+
+        if (result.xlsx_bytes && result.xlsx_filename) {
+          newOutputs.push({
+            bytes: new Uint8Array(result.xlsx_bytes),
+            filename: result.xlsx_filename,
+            mime: XLSX_MIME,
+          });
+          appendLog(`Elkészült boríték Excel: ${result.xlsx_filename}`);
+        }
+      } else {
+        // Saját HTML sablon
+        const list = loadTemplates();
+        const tpl = list.find((t) => t.id === templateSelection.id);
+        if (!tpl) {
+          appendLog("A választott sablon nem található. Válassz másikat.");
+          setBusy(null);
+          return;
+        }
+
+        const knownKeys = new Set(Object.keys(globalValues));
+        const extras = askExtrasForCustom(tpl.html, knownKeys);
+        if (extras === null) {
+          appendLog("Generálás megszakítva (hiányzó sablonadat).");
+          setBusy(null);
+          return;
+        }
+        const allValues = { ...globalValues, ...extras };
+
+        appendLog(`Levél generálása a „${tpl.name}" sablonból (DOC)…`);
+        const { content, missing } = buildCustomLetterDoc(tpl, finalRecipients, allValues, postal);
+        if (missing.length > 0) {
+          appendLog(`Figyelem: kitöltetlen mezők: ${missing.map((m) => `[[${m}]]`).join(", ")}`);
+        }
+        const filename = `kiertesitesek_${stamp}.doc`;
+        newOutputs.push({ text: content, filename, mime: DOC_MIME });
+        appendLog(`Elkészült DOC: ${filename}`);
+
+        // Borítékot postai esetben a Pythonból még mindig készíthetünk a XLSX sablonból.
+        if (postal && makeEnvelope && pyodide && envelopeBytes) {
+          appendLog("Boríték Excel generálása…");
+          // A generate_outputs egyszerűbb hívása csak az XLSX-hez:
+          const result = callPython<{
+            rtf_bytes: Uint8Array;
+            rtf_filename: string;
+            xlsx_bytes: Uint8Array | null;
+            xlsx_filename: string | null;
+            warnings: string[];
+          }>(pyodide, "generate_outputs", {
+            template_bytes: templateBytes,
+            envelope_bytes: envelopeBytes,
+            recipients: finalRecipients,
+            global_values: allValues,
+            postal: true,
+            make_envelope: true,
+          });
+          if (result.xlsx_bytes && result.xlsx_filename) {
+            newOutputs.push({
+              bytes: new Uint8Array(result.xlsx_bytes),
+              filename: result.xlsx_filename,
+              mime: XLSX_MIME,
+            });
+            appendLog(`Elkészült boríték Excel: ${result.xlsx_filename}`);
+          }
+        }
       }
 
       setOutputs(newOutputs);
+
+      // Automatikus letöltés indítása
+      for (const o of newOutputs) {
+        if (o.bytes) downloadBytes(o.bytes, o.filename, o.mime);
+        else if (o.text) downloadText(o.text, o.filename, o.mime);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       appendLog(`Generálási hiba: ${message}`);
@@ -385,76 +527,40 @@ export default function App() {
       </header>
 
       <section className="card">
-        <h2>Sablonok</h2>
-        <div className="row">
-          <label className="field">
-            <span>Levélsablon (RTF):</span>
-            <div className="file-row">
-              <input type="file" accept=".rtf" onChange={onTemplateFile} />
-              <span className="muted">{templateName}</span>
-            </div>
-          </label>
-          <label className="field">
-            <span>Boríték sablon (XLSX):</span>
-            <div className="file-row">
-              <input type="file" accept=".xlsx" onChange={onEnvelopeFile} />
-              <span className="muted">{envelopeName}</span>
-            </div>
-          </label>
+        <h2>1. Kitűzendő földrészlet</h2>
+        <div className="parcel-line">
+          <span>Kitűzendő földrészlet:</span>
+          <input
+            className="parcel-input"
+            value={kozseg}
+            onChange={(e) => setKozseg(e.target.value)}
+            placeholder="község / város"
+          />
+          <span>község/város,</span>
+          <input
+            className="parcel-input parcel-input--small"
+            value={kituzendoHrsz}
+            onChange={(e) => setKituzendoHrsz(e.target.value)}
+            placeholder="hrsz."
+          />
+          <span>hrsz.</span>
         </div>
-      </section>
-
-      <section className="card">
-        <h2>Tulajdoni lapok (PDF / TXT)</h2>
-        <div className="file-row">
-          <input type="file" accept=".pdf,.txt" multiple onChange={onAddInputs} />
-          <button type="button" onClick={clearInputs} disabled={inputFiles.length === 0}>
-            Lista törlése
-          </button>
-        </div>
-        {inputFiles.length > 0 && (
-          <ul className="filelist">
-            {inputFiles.map((f, i) => (
-              <li key={`${f.file.name}-${i}`}>
-                <span>{f.file.name}</span>
-                <button type="button" onClick={() => removeInput(i)}>Eltávolít</button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <div className="actions">
-          <button
-            type="button"
-            onClick={parseInputs}
-            disabled={!pyReady || busy !== null || inputFiles.length === 0}
-          >
-            Címzettek kinyerése
-          </button>
-        </div>
-      </section>
-
-      <section className="card">
-        <h2>Kitűzés adatai</h2>
         <div className="grid">
           <label className="field">
-            <span>1: Kitűzendő földrészlet helyrajzi száma [[kituzendo_hrsz]]</span>
-            <input value={kituzendoHrsz} onChange={(e) => setKituzendoHrsz(e.target.value)} />
+            <span>Kitűzés dátuma</span>
+            <input type="date" value={kituzesIso} onChange={(e) => setKituzesIso(e.target.value)} />
           </label>
           <label className="field">
-            <span>2: Mikor kerül sor a kitűzésre, dátum [[kituzes_datuma]]</span>
-            <input value={kituzesDatuma} onChange={(e) => setKituzesDatuma(e.target.value)} />
+            <span>Kitűzés időpontja (óra:perc)</span>
+            <input type="time" value={oraPerc} onChange={(e) => setOraPerc(e.target.value)} />
           </label>
           <label className="field">
-            <span>3: Hány órakor? óra:perc [[ora_perc]]</span>
-            <input value={oraPerc} onChange={(e) => setOraPerc(e.target.value)} />
-          </label>
-          <label className="field">
-            <span>4: Keltezés dátuma (üresen = mai nap)</span>
-            <input value={keltezes} onChange={(e) => setKeltezes(e.target.value)} />
-          </label>
-          <label className="field field--wide">
-            <span>Település / község [[kozseg]]</span>
-            <input value={kozseg} onChange={(e) => setKozseg(e.target.value)} />
+            <span>Keltezés dátuma</span>
+            <input
+              type="date"
+              value={keltezesIso}
+              onChange={(e) => setKeltezesIso(e.target.value)}
+            />
           </label>
         </div>
         <div className="row">
@@ -494,12 +600,61 @@ export default function App() {
       </section>
 
       <section className="card">
+        <h2>2. Levélsablon</h2>
+        <TemplateManager selection={templateSelection} onSelectionChange={setTemplateSelection} />
+        {templateSelection.kind === "default" && (
+          <div className="muted small">
+            Az alap RTF sablont (a repoban lévő <code>kiertesites4.rtf</code>) használja.
+            Sajátot is feltölthetsz az alapsablon helyére:
+            <input type="file" accept=".rtf" onChange={onDefaultTemplateFile} style={{ marginLeft: 8 }} />
+          </div>
+        )}
+        <div className="muted small">
+          Boríték sablon (XLSX) — postázáshoz, marad ahogy van. Felülírhatod:
+          <input type="file" accept=".xlsx" onChange={onEnvelopeFile} style={{ marginLeft: 8 }} />
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>3. Tulajdoni lapok (PDF / TXT)</h2>
+        <div className="file-row">
+          <input type="file" accept=".pdf,.txt" multiple onChange={onAddInputs} />
+          <span className="muted small">
+            A betöltés után automatikusan kinyerem a címzetteket. Új fájl hozzáadása a meglévő
+            listához fűződik.
+          </span>
+        </div>
+        {inputFiles.length > 0 && (
+          <>
+            <ul className="filelist">
+              {inputFiles.map((f, i) => (
+                <li key={`${f.name}-${i}`}>
+                  <span>{f.name}</span>
+                  <button type="button" onClick={() => removeInput(i)}>Eltávolít</button>
+                </li>
+              ))}
+            </ul>
+            <div className="actions">
+              <button type="button" onClick={clearInputs}>Fájl-lista törlése</button>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="card">
         <div className="card-head">
-          <h2>Címzettek ({recipients.length})</h2>
-          <button type="button" onClick={addRecipient}>+ Új címzett</button>
+          <h2>4. Címzettek ({recipients.length})</h2>
+          <div className="actions">
+            <button type="button" onClick={addRecipient}>+ Új címzett</button>
+            <button type="button" onClick={clearRecipients} disabled={recipients.length === 0}>
+              Összes törlése
+            </button>
+          </div>
         </div>
         {recipients.length === 0 ? (
-          <p className="muted">Még nincsenek címzettek. Adj hozzá tulajdoni lapot és kattints a „Címzettek kinyerése” gombra, vagy adj hozzá manuálisan.</p>
+          <p className="muted">
+            Még nincsenek címzettek. Tölts fel tulajdoni lapot, vagy adj hozzá manuálisan.
+          </p>
         ) : (
           <div className="table-wrap">
             <table className="recipients">
@@ -519,16 +674,10 @@ export default function App() {
                   <tr key={i}>
                     <td>{i + 1}</td>
                     <td>
-                      <input
-                        value={r.name}
-                        onChange={(e) => updateRecipient(i, { name: e.target.value })}
-                      />
+                      <input value={r.name} onChange={(e) => updateRecipient(i, { name: e.target.value })} />
                     </td>
                     <td>
-                      <input
-                        value={r.address}
-                        onChange={(e) => updateRecipient(i, { address: e.target.value })}
-                      />
+                      <input value={r.address} onChange={(e) => updateRecipient(i, { address: e.target.value })} />
                     </td>
                     <td>
                       <input
@@ -566,7 +715,7 @@ export default function App() {
             type="button"
             className="primary"
             onClick={generate}
-            disabled={!pyReady || busy !== null || recipients.length === 0 || !templateBytes}
+            disabled={!pyReady || busy !== null || recipients.length === 0}
           >
             Generálás
           </button>
@@ -574,11 +723,20 @@ export default function App() {
         </div>
         {outputs.length > 0 && (
           <div className="downloads">
-            <h3>Elkészült fájlok</h3>
+            <h3>Elkészült fájlok (újraletöltés)</h3>
             <ul>
               {outputs.map((o) => (
                 <li key={o.filename}>
-                  <a href={o.url} download={o.filename}>{o.filename}</a>
+                  <a
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      if (o.bytes) downloadBytes(o.bytes, o.filename, o.mime);
+                      else if (o.text) downloadText(o.text, o.filename, o.mime);
+                    }}
+                  >
+                    {o.filename}
+                  </a>
                 </li>
               ))}
             </ul>
