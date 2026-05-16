@@ -593,3 +593,54 @@ table.recipients input:focus {
     border-radius: 0;
   }
 }
+
+/* --------- Header gomb és hibaüzenet --------- */
+.header-right {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.settings-btn {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.settings-btn:hover {
+  background: #f9fafb;
+}
+
+.error-text {
+  color: var(--danger);
+}
+
+/* --------- Beállítások modál --------- */
+.modal-window--small {
+  max-width: 640px;
+  margin: 0 auto;
+  flex: 0 1 auto;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.settings-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-body code {
+  background: #f1f5f9;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.settings-body a {
+  color: var(--primary);
+}
