@@ -1,4 +1,4 @@
-import { useEditor, EditorContent } from "@tiptap/react";
+import { useEditor, EditorContent, Extension } from "@tiptap/react";
 import type { Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
@@ -7,6 +7,8 @@ import { Color } from "@tiptap/extension-color";
 import { TextStyle } from "@tiptap/extension-text-style";
 import { FontFamily } from "@tiptap/extension-font-family";
 import Link from "@tiptap/extension-link";
+import { Plugin } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { useEffect, useState } from "react";
 
 const FONT_FAMILIES = [
@@ -18,7 +20,7 @@ const FONT_FAMILIES = [
   "Courier New, monospace",
 ];
 
-const FONT_SIZES = ["10pt", "11pt", "12pt", "14pt", "16pt", "18pt", "24pt"];
+const FONT_SIZES = ["8pt", "9pt", "10pt", "11pt", "12pt", "14pt", "16pt", "18pt", "20pt", "24pt", "28pt"];
 
 const COMMON_PLACEHOLDERS: { name: string; label: string }[] = [
   { name: "kozseg", label: "Község" },
@@ -30,6 +32,95 @@ const COMMON_PLACEHOLDERS: { name: string; label: string }[] = [
   { name: "tulajdonos_cime", label: "Címzett címe" },
 ];
 
+// ---------------------------------------------------------------------------
+// FontSize extension — a TextStyle markhez fontSize attribútum
+// ---------------------------------------------------------------------------
+const FontSize = Extension.create({
+  name: "fontSize",
+  addOptions() {
+    return { types: ["textStyle"] };
+  },
+  addGlobalAttributes() {
+    return [
+      {
+        types: this.options.types,
+        attributes: {
+          fontSize: {
+            default: null,
+            parseHTML: (element: HTMLElement) =>
+              element.style.fontSize?.replace(/['"]+/g, "") || null,
+            renderHTML: (attributes: { fontSize?: string | null }) => {
+              if (!attributes.fontSize) return {};
+              return { style: `font-size: ${attributes.fontSize}` };
+            },
+          },
+        },
+      },
+    ];
+  },
+  addCommands() {
+    return {
+      setFontSize:
+        (size: string) =>
+        ({ chain }: any) =>
+          chain().setMark("textStyle", { fontSize: size }).run(),
+      unsetFontSize:
+        () =>
+        ({ chain }: any) =>
+          chain().setMark("textStyle", { fontSize: null }).removeEmptyTextStyle().run(),
+    } as any;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// FormattingMarks extension — ¶ és ↵ widget-ek
+// ---------------------------------------------------------------------------
+const FormattingMarks = Extension.create({
+  name: "formattingMarks",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          decorations(state) {
+            const decos: Decoration[] = [];
+            state.doc.descendants((node, pos) => {
+              if (node.type.name === "hardBreak") {
+                decos.push(
+                  Decoration.widget(
+                    pos,
+                    () => {
+                      const el = document.createElement("span");
+                      el.textContent = "↵";
+                      el.className = "fm-mark fm-br";
+                      return el;
+                    },
+                    { side: 1 },
+                  ),
+                );
+              }
+              if (node.type.name === "paragraph" && node.isBlock) {
+                decos.push(
+                  Decoration.widget(
+                    pos + node.nodeSize - 1,
+                    () => {
+                      const el = document.createElement("span");
+                      el.textContent = "¶";
+                      el.className = "fm-mark fm-par";
+                      return el;
+                    },
+                    { side: 1 },
+                  ),
+                );
+              }
+            });
+            return DecorationSet.create(state.doc, decos);
+          },
+        },
+      }),
+    ];
+  },
+});
+
 type Props = {
   open: boolean;
   initialHtml?: string;
@@ -40,15 +131,18 @@ type Props = {
 
 export default function RichEditor({ open, initialHtml, initialName, onCancel, onSave }: Props) {
   const [name, setName] = useState(initialName ?? "");
+  const [showMarks, setShowMarks] = useState(false);
 
   const editor = useEditor({
     extensions: [
-      StarterKit,
+      StarterKit.configure({ heading: false }),
       Underline,
-      TextAlign.configure({ types: ["heading", "paragraph"] }),
+      TextAlign.configure({ types: ["paragraph"] }),
       TextStyle,
       Color,
       FontFamily,
+      FontSize,
+      FormattingMarks,
       Link.configure({ openOnClick: false }),
     ],
     content: initialHtml ?? "<p></p>",
@@ -104,14 +198,8 @@ export default function RichEditor({ open, initialHtml, initialName, onCancel, o
   };
 
   const setFontSize = (size: string) => {
-    if (!size) {
-      editor.chain().focus().unsetMark("textStyle", { extendEmptyMarkRange: true }).run();
-      return;
-    }
-    // A TextStyle mark style attribútumát manuálisan állítjuk:
-    editor.chain().focus().setMark("textStyle", { style: `font-size: ${size}` } as any).run();
-    const html = editor.getHTML();
-    editor.commands.setContent(html);
+    if (size) (editor.chain().focus() as any).setFontSize(size).run();
+    else (editor.chain().focus() as any).unsetFontSize().run();
   };
 
   const setColor = (color: string) => {
@@ -148,6 +236,8 @@ export default function RichEditor({ open, initialHtml, initialName, onCancel, o
 
         <Toolbar
           editor={editor}
+          showMarks={showMarks}
+          onToggleMarks={() => setShowMarks((v) => !v)}
           onInsertPlaceholder={insertPlaceholder}
           onInsertCustomPlaceholder={insertCustomPlaceholder}
           onInsertOnlyPersonal={insertOnlyPersonalBlock}
@@ -156,7 +246,7 @@ export default function RichEditor({ open, initialHtml, initialName, onCancel, o
           onColor={setColor}
         />
 
-        <div className="rich-editor-wrap">
+        <div className={`rich-editor-wrap ${showMarks ? "show-marks" : ""}`}>
           <EditorContent editor={editor} />
         </div>
 
@@ -165,6 +255,7 @@ export default function RichEditor({ open, initialHtml, initialName, onCancel, o
             <strong>Tipp:</strong> A változókat <code>[[név]]</code> formában szúrd be — a
             generálásnál ezek lesznek lecserélve a címzett vagy a kitűzés adataira.
             A „Csak személyes" blokk postai kézbesítésnél automatikusan kimarad.
+            A ¶ gombbal megjelennek a bekezdés- és sortörés-jelek.
           </p>
         </footer>
       </div>
@@ -174,6 +265,8 @@ export default function RichEditor({ open, initialHtml, initialName, onCancel, o
 
 type ToolbarProps = {
   editor: Editor;
+  showMarks: boolean;
+  onToggleMarks: () => void;
   onInsertPlaceholder: (name: string) => void;
   onInsertCustomPlaceholder: () => void;
   onInsertOnlyPersonal: () => void;
@@ -184,6 +277,8 @@ type ToolbarProps = {
 
 function Toolbar({
   editor,
+  showMarks,
+  onToggleMarks,
   onInsertPlaceholder,
   onInsertCustomPlaceholder,
   onInsertOnlyPersonal,
@@ -216,27 +311,6 @@ function Toolbar({
       </div>
 
       <div className="tb-group">
-        <select
-          className="tb-select"
-          defaultValue=""
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v === "p") {
-              editor.chain().focus().setParagraph().run();
-            } else if (v.startsWith("h")) {
-              const level = Number(v.slice(1)) as 1 | 2 | 3;
-              editor.chain().focus().toggleHeading({ level }).run();
-            }
-            e.target.value = "";
-          }}
-        >
-          <option value="">Stílus…</option>
-          <option value="p">Bekezdés</option>
-          <option value="h1">Címsor 1</option>
-          <option value="h2">Címsor 2</option>
-          <option value="h3">Címsor 3</option>
-        </select>
-
         <select
           className="tb-select"
           defaultValue=""
@@ -283,35 +357,16 @@ function Toolbar({
       </div>
 
       <div className="tb-group">
-        {btn(
-          isAlign("left"),
-          "⯇",
-          () => editor.chain().focus().setTextAlign("left").run(),
-          "Balra zár",
-        )}
-        {btn(
-          isAlign("center"),
-          "≡",
-          () => editor.chain().focus().setTextAlign("center").run(),
-          "Középre",
-        )}
-        {btn(
-          isAlign("right"),
-          "⯈",
-          () => editor.chain().focus().setTextAlign("right").run(),
-          "Jobbra zár",
-        )}
-        {btn(
-          isAlign("justify"),
-          "≣",
-          () => editor.chain().focus().setTextAlign("justify").run(),
-          "Sorkizárt",
-        )}
+        {btn(isAlign("left"), "⯇", () => editor.chain().focus().setTextAlign("left").run(), "Balra zár")}
+        {btn(isAlign("center"), "≡", () => editor.chain().focus().setTextAlign("center").run(), "Középre")}
+        {btn(isAlign("right"), "⯈", () => editor.chain().focus().setTextAlign("right").run(), "Jobbra zár")}
+        {btn(isAlign("justify"), "≣", () => editor.chain().focus().setTextAlign("justify").run(), "Sorkizárt")}
       </div>
 
       <div className="tb-group">
         {btn(false, "↶", () => editor.chain().focus().undo().run(), "Vissza")}
         {btn(false, "↷", () => editor.chain().focus().redo().run(), "Előre")}
+        {btn(showMarks, "¶", onToggleMarks, "Formátum-jelek megjelenítése (¶, ↵)")}
       </div>
 
       <div className="tb-group tb-group--placeholders">
