@@ -558,7 +558,7 @@ table.recipients input:focus {
 }
 
 .rich-editor-content p {
-  margin: 0 0 8pt 0;
+  margin: 0;
   min-height: 1em;
 }
 
@@ -643,4 +643,27 @@ table.recipients input:focus {
 
 .settings-body a {
   color: var(--primary);
+}
+
+/* --------- Formátum-jelek (¶, ↵) --------- */
+.fm-mark {
+  display: none;
+  color: #a3a3a3;
+  font-weight: normal;
+  font-size: 0.85em;
+  margin: 0 1px;
+  user-select: none;
+  pointer-events: none;
+}
+
+.rich-editor-wrap.show-marks .fm-mark {
+  display: inline;
+}
+
+.rich-editor-wrap.show-marks .fm-br {
+  color: #4f46e5;
+}
+
+.rich-editor-wrap.show-marks .fm-par {
+  color: #a3a3a3;
 }

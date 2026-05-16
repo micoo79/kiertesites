@@ -215,7 +215,7 @@ export function buildCustomLetterDoc(
   div.WordSection1 { page: WordSection1; }
   body { font-family: "Times New Roman", serif; font-size: 12pt; line-height: 1.4; }
   p {
-    margin: 0 0 8pt 0;
+    margin: 0;
     mso-margin-top-alt: auto;
     mso-margin-bottom-alt: auto;
     mso-pagination: widow-orphan;
@@ -223,7 +223,7 @@ export function buildCustomLetterDoc(
   }
   .letter-page { page-break-after: always; }
   .letter-page:last-child { page-break-after: auto; }
-  ul, ol { margin: 0 0 8pt 24pt; }
+  ul, ol { margin: 0 0 0 24pt; }
   br { mso-special-character: line-break; }
 </style>
 </head>
