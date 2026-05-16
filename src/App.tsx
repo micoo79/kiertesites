@@ -4,7 +4,7 @@ import type { PyodideInterface } from "./pyodide.d";
 import TemplateManager from "./TemplateManager";
 import SettingsModal from "./SettingsModal";
 import type { TemplateSelection } from "./templates";
-import { buildCustomLetterDoc } from "./templates";
+import { base64ToBytes } from "./templates";
 import { readCachedTemplates } from "./githubStorage";
 import {
   downloadBytes,
@@ -41,7 +41,15 @@ const ROLE_OPTIONS = [
 
 const RTF_MIME = "application/rtf";
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-const DOC_MIME = "application/msword";
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+const MIME_BY_EXTENSION: Record<string, string> = {
+  rtf: RTF_MIME,
+  docx: DOCX_MIME,
+};
+
+const ONLY_PERSONAL_PLACEHOLDER_START = "csak_szemelyes";
+const ONLY_PERSONAL_PLACEHOLDER_END = "/csak_szemelyes";
 
 async function fetchAsBytes(url: string): Promise<Uint8Array> {
   const res = await fetch(url);
@@ -475,59 +483,93 @@ export default function App() {
           appendLog(`Elkészült boríték Excel: ${result.xlsx_filename}`);
         }
       } else {
-        // Saját HTML sablon — a TemplateManager letöltötte a webről, cache-ből vesszük.
+        // Saját feltöltött sablon (RTF vagy DOCX) — a TemplateManager már letöltötte
+        // a webről, a cache-ben benne van a base64 tartalom.
         const list = readCachedTemplates().templates;
         const tpl = list.find((t) => t.id === templateSelection.id);
-        if (!tpl) {
-          appendLog("A választott sablon nem található. Frissítsd a listát.");
+        if (!tpl || !tpl.data_b64 || (tpl.mime !== "rtf" && tpl.mime !== "docx")) {
+          appendLog("A választott sablon nem található vagy nem támogatott formátum.");
+          setBusy(null);
+          return;
+        }
+        if (!pyodide) {
+          appendLog("A Pyodide még nem áll készen.");
           setBusy(null);
           return;
         }
 
-        const knownKeys = new Set(Object.keys(globalValues));
-        const extras = askExtrasForCustom(tpl.html, knownKeys);
-        if (extras === null) {
-          appendLog("Generálás megszakítva (hiányzó sablonadat).");
-          setBusy(null);
-          return;
+        const tplBytes = base64ToBytes(tpl.data_b64);
+
+        // Extra placeholdereket bekérünk a Python segítségével
+        const info = callPython<{ kind: string; placeholders: string[] }>(
+          pyodide,
+          "list_template_placeholders",
+          { template_bytes: tplBytes, template_filename: tpl.filename },
+        );
+        const placeholders = info?.placeholders ?? [];
+        const knownKeys = new Set([
+          ...Object.keys(globalValues),
+          "tulajdonos_neve", "tulajdonos_cime", "tulajdonos_címe",
+          "cimzett_neve", "címzett_neve",
+          "cimzett_cime", "címzett_cime", "cimzett_címe", "címzett_címe",
+          "kozseg", "keltezés",
+          ONLY_PERSONAL_PLACEHOLDER_START, ONLY_PERSONAL_PLACEHOLDER_END,
+        ]);
+        const extras: Record<string, string> = {};
+        for (const name of placeholders) {
+          if (knownKeys.has(name)) continue;
+          const value = window.prompt(
+            `A sablonban találtam egy további mezőt:\n\n[[${name}]]\n\nAdd meg az értékét:`,
+          );
+          if (value === null) {
+            appendLog("Generálás megszakítva (hiányzó sablonadat).");
+            setBusy(null);
+            return;
+          }
+          if (!value.trim()) {
+            window.alert(`A(z) [[${name}]] mező nem maradhat üresen.`);
+            setBusy(null);
+            return;
+          }
+          extras[name] = value.trim();
         }
+
         const allValues = { ...globalValues, ...extras };
 
-        appendLog(`Levél generálása a „${tpl.name}" sablonból (DOC)…`);
-        const { content, missing } = buildCustomLetterDoc(tpl, finalRecipients, allValues, postal);
-        if (missing.length > 0) {
-          appendLog(`Figyelem: kitöltetlen mezők: ${missing.map((m) => `[[${m}]]`).join(", ")}`);
-        }
-        const filename = `kiertesitesek_${stamp}.doc`;
-        newOutputs.push({ text: content, filename, mime: DOC_MIME });
-        appendLog(`Elkészült DOC: ${filename}`);
+        appendLog(`Levél generálása a „${tpl.name}" (${tpl.mime.toUpperCase()}) sablonból…`);
+        const result = callPython<{
+          letter_bytes: Uint8Array;
+          letter_filename: string;
+          letter_mime: string;
+          xlsx_bytes: Uint8Array | null;
+          xlsx_filename: string | null;
+          warnings: string[];
+        }>(pyodide, "generate_outputs_from_uploaded_template", {
+          template_bytes: tplBytes,
+          template_filename: tpl.filename,
+          envelope_bytes: postal && makeEnvelope ? envelopeBytes : null,
+          recipients: finalRecipients,
+          global_values: allValues,
+          postal,
+          make_envelope: makeEnvelope,
+        });
 
-        // Borítékot postai esetben a Pythonból még mindig készíthetünk a XLSX sablonból.
-        if (postal && makeEnvelope && pyodide && envelopeBytes) {
-          appendLog("Boríték Excel generálása…");
-          // A generate_outputs egyszerűbb hívása csak az XLSX-hez:
-          const result = callPython<{
-            rtf_bytes: Uint8Array;
-            rtf_filename: string;
-            xlsx_bytes: Uint8Array | null;
-            xlsx_filename: string | null;
-            warnings: string[];
-          }>(pyodide, "generate_outputs", {
-            template_bytes: templateBytes,
-            envelope_bytes: envelopeBytes,
-            recipients: finalRecipients,
-            global_values: allValues,
-            postal: true,
-            make_envelope: true,
+        for (const w of result.warnings) appendLog(w);
+
+        newOutputs.push({
+          bytes: new Uint8Array(result.letter_bytes),
+          filename: result.letter_filename,
+          mime: result.letter_mime || MIME_BY_EXTENSION[tpl.mime],
+        });
+        appendLog(`Elkészült: ${result.letter_filename}`);
+
+        if (result.xlsx_bytes && result.xlsx_filename) {
+          newOutputs.push({
+            bytes: new Uint8Array(result.xlsx_bytes),
+            filename: result.xlsx_filename,
+            mime: XLSX_MIME,
           });
-          if (result.xlsx_bytes && result.xlsx_filename) {
-            newOutputs.push({
-              bytes: new Uint8Array(result.xlsx_bytes),
-              filename: result.xlsx_filename,
-              mime: XLSX_MIME,
-            });
-            appendLog(`Elkészült boríték Excel: ${result.xlsx_filename}`);
-          }
+          appendLog(`Elkészült boríték Excel: ${result.xlsx_filename}`);
         }
       }
 
