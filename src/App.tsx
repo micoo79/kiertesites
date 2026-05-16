@@ -2,11 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePyodide } from "./usePyodide";
 import type { PyodideInterface } from "./pyodide.d";
 import TemplateManager from "./TemplateManager";
+import SettingsModal from "./SettingsModal";
 import type { TemplateSelection } from "./templates";
-import {
-  buildCustomLetterDoc,
-  loadTemplates,
-} from "./templates";
+import { buildCustomLetterDoc } from "./templates";
+import { readCachedTemplates } from "./githubStorage";
 import {
   downloadBytes,
   downloadText,
@@ -118,6 +117,9 @@ export default function App() {
 
   const [outputs, setOutputs] = useState<GeneratedFile[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [templatesReloadKey, setTemplatesReloadKey] = useState(0);
 
   const logRef = useRef<HTMLPreElement>(null);
 
@@ -441,11 +443,11 @@ export default function App() {
           appendLog(`Elkészült boríték Excel: ${result.xlsx_filename}`);
         }
       } else {
-        // Saját HTML sablon
-        const list = loadTemplates();
+        // Saját HTML sablon — a TemplateManager letöltötte a webről, cache-ből vesszük.
+        const list = readCachedTemplates().templates;
         const tpl = list.find((t) => t.id === templateSelection.id);
         if (!tpl) {
-          appendLog("A választott sablon nem található. Válassz másikat.");
+          appendLog("A választott sablon nem található. Frissítsd a listát.");
           setBusy(null);
           return;
         }
@@ -523,7 +525,12 @@ export default function App() {
     <div className="app">
       <header className="header">
         <h1>Kiértesítés készítő</h1>
-        <span className={`status status--${statusBadge.kind}`}>{statusBadge.text}</span>
+        <div className="header-right">
+          <button type="button" className="settings-btn" onClick={() => setSettingsOpen(true)}>
+            ⚙ Beállítások
+          </button>
+          <span className={`status status--${statusBadge.kind}`}>{statusBadge.text}</span>
+        </div>
       </header>
 
       <section className="card">
@@ -601,7 +608,12 @@ export default function App() {
 
       <section className="card">
         <h2>2. Levélsablon</h2>
-        <TemplateManager selection={templateSelection} onSelectionChange={setTemplateSelection} />
+        <TemplateManager
+          selection={templateSelection}
+          onSelectionChange={setTemplateSelection}
+          onOpenSettings={() => setSettingsOpen(true)}
+          reloadKey={templatesReloadKey}
+        />
         {templateSelection.kind === "default" && (
           <div className="muted small">
             Az alap RTF sablont (a repoban lévő <code>kiertesites4.rtf</code>) használja.
@@ -754,6 +766,12 @@ export default function App() {
       <footer className="footer">
         <span>Kiértesítés készítő — böngészőben futó Python (Pyodide).</span>
       </footer>
+
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={() => setTemplatesReloadKey((k) => k + 1)}
+      />
     </div>
   );
 }

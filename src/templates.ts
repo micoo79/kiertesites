@@ -1,12 +1,11 @@
 /**
- * Saját HTML sablonok kezelése (LocalStorage).
+ * Saját HTML sablonok — típusok és HTML-alapú levél-generálás.
  *
- * A `kiertesites4.rtf` az alapértelmezett RTF-alapú sablon. A felhasználói
- * sablonok HTML-ben tárolódnak, és .doc fájlként generálódnak (a Word
- * problémamentesen megnyitja a HTML-alapú Word fájlokat).
+ * Tárolás: a sablonok a GitHub repo `data/templates.json` fájljában vannak
+ * (lásd `githubStorage.ts`), így minden böngészőből ugyanazok elérhetők.
+ *
+ * Kimenet: .doc fájl (Word-kompatibilis HTML).
  */
-
-const STORAGE_KEY = "kiertesites_custom_templates_v1";
 
 export type CustomTemplate = {
   id: string;
@@ -19,40 +18,6 @@ export type CustomTemplate = {
 export type TemplateSelection =
   | { kind: "default" }
   | { kind: "custom"; id: string };
-
-export function loadTemplates(): CustomTemplate[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as CustomTemplate[];
-    if (!Array.isArray(parsed)) return [];
-    return parsed;
-  } catch {
-    return [];
-  }
-}
-
-export function saveTemplates(list: CustomTemplate[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-}
-
-export function upsertTemplate(tpl: CustomTemplate): CustomTemplate[] {
-  const list = loadTemplates();
-  const idx = list.findIndex((t) => t.id === tpl.id);
-  if (idx >= 0) {
-    list[idx] = { ...tpl, updatedAt: Date.now() };
-  } else {
-    list.unshift({ ...tpl, createdAt: Date.now(), updatedAt: Date.now() });
-  }
-  saveTemplates(list);
-  return list;
-}
-
-export function deleteTemplate(id: string): CustomTemplate[] {
-  const list = loadTemplates().filter((t) => t.id !== id);
-  saveTemplates(list);
-  return list;
-}
 
 export function newTemplateId(): string {
   return `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
