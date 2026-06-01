@@ -131,6 +131,10 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [templatesReloadKey, setTemplatesReloadKey] = useState(0);
 
+  const [previewText, setPreviewText] = useState<string>("");
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
   const logRef = useRef<HTMLPreElement>(null);
 
   const appendLog = useCallback((line: string) => {
@@ -407,6 +411,87 @@ export default function App() {
     }
     return extras;
   };
+
+  // -----------------------------------------------------------------------
+  // Előnézet az első címzetthez (automatikus, debounced)
+  // -----------------------------------------------------------------------
+  const previewKey = JSON.stringify({
+    r: recipients[0] || null,
+    kozseg, kituzendoHrsz, kituzesIso, oraPerc, keltezesIso,
+    deliveryMode,
+    sel: templateSelection,
+    customDefaultName,
+    tplLen: templateBytes?.length ?? 0,
+  });
+
+  useEffect(() => {
+    if (!pyodide) {
+      setPreviewText("");
+      setPreviewError(null);
+      return;
+    }
+    if (recipients.length === 0) {
+      setPreviewText("");
+      setPreviewError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      try {
+        let tplBytesArg: Uint8Array | null = null;
+        let tplFilename = "";
+
+        if (templateSelection.kind === "default") {
+          if (!templateBytes) return;
+          tplBytesArg = templateBytes;
+          tplFilename = "";
+        } else {
+          const list = readCachedTemplates().templates;
+          const tpl = list.find((t) => t.id === templateSelection.id);
+          if (!tpl || (tpl.mime !== "rtf" && tpl.mime !== "docx") || !tpl.data_b64) return;
+          tplBytesArg = base64ToBytes(tpl.data_b64);
+          tplFilename = tpl.filename;
+        }
+
+        const globals: Record<string, string> = {
+          kozseg: kozseg.trim(),
+          kituzendo_hrsz: kituzendoHrsz.trim(),
+          kituzes_datuma: kituzesIso ? isoDateToHu(kituzesIso) : "",
+          ora_perc: oraPerc.trim(),
+          keltezes: keltezesIso ? isoDateToHu(keltezesIso) : todayHu(),
+        };
+
+        setPreviewLoading(true);
+        const result = callPython<{ text: string }>(pyodide, "preview_first_letter", {
+          template_bytes: tplBytesArg,
+          template_filename: tplFilename,
+          recipient: recipients[0],
+          global_values: globals,
+          postal: deliveryMode === "posta",
+        });
+
+        if (!cancelled) {
+          setPreviewText(result.text || "");
+          setPreviewError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setPreviewError((err as Error).message);
+          setPreviewText("");
+        }
+      } finally {
+        if (!cancelled) setPreviewLoading(false);
+      }
+    }, 400);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pyodide, previewKey]);
 
   const generate = async () => {
     const globalValues = validateCommon();
@@ -854,6 +939,24 @@ export default function App() {
               ))}
             </ul>
           </div>
+        )}
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <h2>Előnézet — első címzett</h2>
+          {previewLoading && <span className="muted small">Frissítés…</span>}
+        </div>
+        {recipients.length === 0 ? (
+          <p className="muted">
+            Még nincs címzett. Tölts fel tulajdoni lapot — az első címzettre készül előnézet.
+          </p>
+        ) : previewError ? (
+          <div className="error-text small">⚠ {previewError}</div>
+        ) : previewText ? (
+          <pre className="preview">{previewText}</pre>
+        ) : (
+          <p className="muted">Előnézet betöltése…</p>
         )}
       </section>
 
