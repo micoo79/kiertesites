@@ -34,6 +34,8 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Pages csak a main branchről deployolható az environment protection rules miatt
+    if: github.ref == 'refs/heads/main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
