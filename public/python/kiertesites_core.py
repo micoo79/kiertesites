@@ -1475,3 +1475,114 @@ def generate_outputs_from_uploaded_template(payload_obj):
         "xlsx_filename": xlsx_filename,
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Előnézet — egyszerű szöveges előnézet az első címzetthez
+# ---------------------------------------------------------------------------
+
+def preview_first_letter(payload_obj):
+    """Egyszerű szöveges előnézet az első címzetthez.
+
+    payload:
+      template_bytes: bytes (alap RTF vagy feltöltött RTF/DOCX)
+      template_filename: str  (üres = alap kiertesites4.rtf)
+      recipient: { name, address, role, settlement }
+      global_values: {...}
+      postal: bool
+    """
+    payload = _coerce_to_python(payload_obj) or {}
+    template_bytes = payload.get("template_bytes")
+    if not isinstance(template_bytes, (bytes, bytearray)):
+        template_bytes = bytes(template_bytes)
+    template_bytes = bytes(template_bytes)
+    filename = str(payload.get("template_filename", "")).lower()
+
+    raw_recipient = _coerce_to_python(payload.get("recipient")) or {}
+    recipient = Recipient(
+        name=str(raw_recipient.get("name", "")).strip(),
+        address=str(raw_recipient.get("address", "")).strip(),
+        role=str(raw_recipient.get("role", "tulajdonos")).strip() or "tulajdonos",
+        source_file="",
+        settlement=str(raw_recipient.get("settlement", "")).strip(),
+    )
+
+    global_values = _coerce_to_python(payload.get("global_values")) or {}
+    global_values = {str(k): str(v) for k, v in global_values.items()}
+    if not global_values.get("keltezes", "").strip():
+        global_values["keltezes"] = today_hu()
+    if not recipient.settlement:
+        recipient.settlement = global_values.get("kozseg", "")
+
+    postal = bool(payload.get("postal", False))
+
+    values = dict(global_values)
+    values.update(
+        {
+            "tulajdonos_neve": recipient.name,
+            "tulajdonos_cime": recipient.address,
+            "kozseg": recipient.settlement or global_values.get("kozseg", ""),
+            "cimzett_neve": recipient.name,
+            "cimzett_cime": recipient.address,
+        }
+    )
+    aliases = build_placeholder_aliases(values)
+
+    is_docx = filename.endswith(".docx")
+    is_custom_rtf = filename.endswith(".rtf")
+
+    if is_docx:
+        try:
+            from docx import Document
+        except ImportError:
+            return {"text": "[A python-docx könyvtár nem érhető el az előnézethez.]"}
+        doc = Document(io.BytesIO(template_bytes))
+        lines: List[str] = []
+        in_block = False
+        for p in doc.paragraphs:
+            text = p.text
+            has_start = ONLY_PERSONAL_START in text
+            has_end = ONLY_PERSONAL_END in text
+            if postal:
+                if has_start and has_end:
+                    continue
+                if has_start:
+                    in_block = True
+                    continue
+                if has_end:
+                    in_block = False
+                    continue
+                if in_block:
+                    continue
+                lines.append(text)
+            else:
+                text = text.replace(ONLY_PERSONAL_START, "").replace(ONLY_PERSONAL_END, "")
+                lines.append(text)
+        full_text = "\n".join(lines)
+    else:
+        rtf, cp = read_rtf_bytes(template_bytes)
+        if is_custom_rtf:
+            rtf = _apply_personal_markers_rtf(rtf, cp, postal)
+        else:
+            # Alap kiertesites4.rtf — eredeti viselkedés
+            if postal:
+                rtf = remove_acknowledgement_block(rtf, codepage=cp)
+        try:
+            _prefix, body, _suffix = split_rtf_document(rtf)
+        except Exception:
+            body = rtf
+        items = rtf_text_map(body, codepage=cp)
+        full_text = "".join(item.char for item in items)
+
+    def replace_fn(match):
+        name = normalize_placeholder_name(match.group(1))
+        value = aliases.get(name)
+        return value if value is not None else match.group(0)
+
+    full_text = PLACEHOLDER_RE.sub(replace_fn, full_text)
+    full_text = STAR_PLACEHOLDER_RE.sub(replace_fn, full_text)
+
+    # Tisztítás: a túl sok üres sort kettőre csökkentjük
+    full_text = re.sub(r"\n{3,}", "\n\n", full_text)
+    full_text = full_text.strip("\n")
+    return {"text": full_text}
