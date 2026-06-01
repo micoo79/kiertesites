@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 declare global {
   interface Window {
     loadPyodide: (opts?: { indexURL?: string }) => Promise<PyodideInterface>;
@@ -19,4 +21,14 @@ export interface PyodideInterface {
     mkdirTree: (path: string) => void;
   };
   toPy: (value: unknown) => any;
+}
+
+declare module "*.py?url" {
+  const url: string;
+  export default url;
+}
+
+declare module "*?url" {
+  const url: string;
+  export default url;
 }
