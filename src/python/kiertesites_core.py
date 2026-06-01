@@ -1146,6 +1146,73 @@ def _remove_marker_only_rtf(rtf_text: str, codepage: str, marker_text: str) -> s
     return rtf_text
 
 
+def _strip_binary_destinations(rtf_text: str) -> str:
+    """Bináris/non-displayed RTF destination group-ok eltávolítása.
+
+    Az olyan group-okat, mint a beágyazott objektumok (\\object, \\objdata),
+    képek (\\pict) vagy bináris adatok (\\bin), a preview-hoz nem szabad
+    szövegként kezelni, mert hex dump-ot adnak ki. Itt teljesen kivesszük
+    ezeket az RTF-ből, hogy a látható szöveg tiszta legyen.
+    """
+    # Csak a destination-ok neve — a `\` és az opcionális `\*` előtag
+    # a regex-be kerül.
+    destinations = (
+        # Header-ben szereplő destinations (gyakran \*-os, pl. {\*\stylesheet)
+        "fonttbl",
+        "colortbl",
+        "stylesheet",
+        "listtable",
+        "listoverridetable",
+        "rsidtbl",
+        "generator",
+        "info",
+        "latentstyles",
+        "themedata",
+        "colorschememapping",
+        "datastore",
+        "filetbl",
+        "xmlnstbl",
+        "protlevel",
+        "wgrffmtfilter",
+        "mmathPr",
+        # Binary/encoded tartalmak
+        "objdata",
+        "objalias",
+        "objclass",
+        "datafield",
+        "object",
+        "pict",
+        "bin",
+        "result",
+    )
+
+    for dest in destinations:
+        # Opcionálisan elfogadja a {\*\xxx és a {\xxx formákat is
+        pattern = re.compile(
+            r"\{\s*(?:\\\*\s*)?\\" + dest + r"\b",
+            re.IGNORECASE,
+        )
+        while True:
+            m = pattern.search(rtf_text)
+            if not m:
+                break
+            depth = 1
+            i = m.end()
+            n = len(rtf_text)
+            while i < n and depth > 0:
+                ch = rtf_text[i]
+                if ch == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                i += 1
+            rtf_text = rtf_text[:m.start()] + rtf_text[i:]
+    return rtf_text
+
+
 def _apply_personal_markers_rtf(rtf_text: str, codepage: str, postal: bool) -> str:
     """A [[csak_szemelyes]]...[[/csak_szemelyes]] blokk kezelése a feltöltött RTF-ben."""
     if postal:
@@ -1567,6 +1634,7 @@ def preview_first_letter(payload_obj):
             # Alap kiertesites4.rtf — eredeti viselkedés
             if postal:
                 rtf = remove_acknowledgement_block(rtf, codepage=cp)
+        rtf = _strip_binary_destinations(rtf)
         try:
             _prefix, body, _suffix = split_rtf_document(rtf)
         except Exception:
