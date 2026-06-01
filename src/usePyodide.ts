@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { PyodideInterface } from "./pyodide.d";
+import coreSourceUrl from "./python/kiertesites_core.py?url";
 
 const PYODIDE_VERSION = "0.26.4";
 const PYODIDE_BASE = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
@@ -49,8 +50,8 @@ await micropip.install(["openpyxl", "pypdf", "python-docx"])
 `);
 
   onProgress("Magmodul betöltése…");
-  const coreUrl = new URL("python/kiertesites_core.py", document.baseURI).toString();
-  const response = await fetch(coreUrl);
+  // A coreSourceUrl-t a Vite hash-eli build során, így a böngésző mindig friss verziót tölt.
+  const response = await fetch(coreSourceUrl);
   if (!response.ok) {
     throw new Error(`Nem sikerült letölteni a Python magmodult: ${response.status}`);
   }
