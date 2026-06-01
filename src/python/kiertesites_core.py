@@ -1233,30 +1233,61 @@ def _apply_personal_markers_rtf(rtf_text: str, codepage: str, postal: bool) -> s
 
 
 def _replace_in_docx_paragraph(p_elem, aliases: Dict[str, str]) -> None:
-    """Paragrafus szövegében cseréli a [[placeholder]]-eket. A formázás
-    egy paragrafuson belül egységessé válik (egy w:t-be kerül a teljes szöveg)."""
+    """Paragrafus szövegében cseréli a [[placeholder]]-eket úgy, hogy a
+    run-ok formázása megmaradjon. Csak akkor egyesít szövegcsomópontokat,
+    ha a placeholder több run-on keresztül megy."""
     from docx.oxml.ns import qn
 
     text_nodes = p_elem.findall(".//" + qn("w:t"))
     if not text_nodes:
         return
-    full_text = "".join(t.text or "" for t in text_nodes)
 
-    def replace_fn(match: "re.Match") -> str:
-        name = normalize_placeholder_name(match.group(1))
-        value = aliases.get(name)
-        if value is None:
-            return match.group(0)
-        return value
+    # (start, end, node) lista — az eredeti szöveg karakter-pozíciója szerint
+    spans: List[Tuple[int, int, object]] = []
+    offset = 0
+    parts: List[str] = []
+    for node in text_nodes:
+        txt = node.text or ""
+        spans.append((offset, offset + len(txt), node))
+        offset += len(txt)
+        parts.append(txt)
+    full_text = "".join(parts)
 
-    new_text = PLACEHOLDER_RE.sub(replace_fn, full_text)
-    new_text = STAR_PLACEHOLDER_RE.sub(replace_fn, new_text)
+    matches: List[Tuple[int, int, str]] = []
+    for rex in (PLACEHOLDER_RE, STAR_PLACEHOLDER_RE):
+        for m in rex.finditer(full_text):
+            name = normalize_placeholder_name(m.group(1))
+            value = aliases.get(name)
+            if value is None:
+                continue
+            matches.append((m.start(), m.end(), value))
 
-    if new_text != full_text:
-        text_nodes[0].text = new_text
-        text_nodes[0].set(qn("xml:space"), "preserve")
-        for t in text_nodes[1:]:
-            t.text = ""
+    if not matches:
+        return
+
+    # Hátulról előre cseréljünk, hogy a spans offset-jei a még feldolgozatlan
+    # match-eknél érvényesek maradjanak.
+    matches.sort(key=lambda x: x[0], reverse=True)
+
+    for m_start, m_end, value in matches:
+        affected = [(s, e, n) for s, e, n in spans if not (e <= m_start or s >= m_end)]
+        if not affected:
+            continue
+
+        first_start, _first_end, first_node = affected[0]
+        last_start, _last_end, last_node = affected[-1]
+
+        prefix = (first_node.text or "")[: m_start - first_start]
+        suffix = (last_node.text or "")[m_end - last_start :]
+
+        new_first_text = prefix + value + suffix
+        first_node.text = new_first_text
+        first_node.set(qn("xml:space"), "preserve")
+
+        # A többi érintett w:t kiürítése — fontos: a hozzájuk tartozó w:r-t
+        # ne dobjuk el, hogy a többi formátumadat (bookmark, stb.) megmaradjon.
+        for _s, _e, node in affected[1:]:
+            node.text = ""
 
 
 def _paragraph_text(p_elem) -> str:
@@ -1267,7 +1298,7 @@ def _paragraph_text(p_elem) -> str:
 
 
 def _strip_text_from_paragraph(p_elem, fragment: str) -> None:
-    """Egy adott szöveges fragmentumot eltávolít a paragrafusból (akár több w:t-ből összerakva)."""
+    """Egy szöveg-fragmentumot eltávolít a paragrafusból, a többi run formázását megőrizve."""
     from docx.oxml.ns import qn
 
     if not fragment:
@@ -1275,13 +1306,39 @@ def _strip_text_from_paragraph(p_elem, fragment: str) -> None:
     text_nodes = p_elem.findall(".//" + qn("w:t"))
     if not text_nodes:
         return
-    full_text = "".join(t.text or "" for t in text_nodes)
-    new_text = full_text.replace(fragment, "")
-    if new_text != full_text:
-        text_nodes[0].text = new_text
-        text_nodes[0].set(qn("xml:space"), "preserve")
-        for t in text_nodes[1:]:
-            t.text = ""
+
+    spans: List[Tuple[int, int, object]] = []
+    offset = 0
+    parts: List[str] = []
+    for node in text_nodes:
+        txt = node.text or ""
+        spans.append((offset, offset + len(txt), node))
+        offset += len(txt)
+        parts.append(txt)
+    full_text = "".join(parts)
+
+    flen = len(fragment)
+    matches: List[Tuple[int, int]] = []
+    i = 0
+    while True:
+        idx = full_text.find(fragment, i)
+        if idx == -1:
+            break
+        matches.append((idx, idx + flen))
+        i = idx + flen
+
+    for m_start, m_end in reversed(matches):
+        affected = [(s, e, n) for s, e, n in spans if not (e <= m_start or s >= m_end)]
+        if not affected:
+            continue
+        first_start, _fe, first_node = affected[0]
+        last_start, _le, last_node = affected[-1]
+        prefix = (first_node.text or "")[: m_start - first_start]
+        suffix = (last_node.text or "")[m_end - last_start :]
+        first_node.text = prefix + suffix
+        first_node.set(qn("xml:space"), "preserve")
+        for _s, _e, node in affected[1:]:
+            node.text = ""
 
 
 def _process_docx_personal_markers(body_elems, postal: bool):
